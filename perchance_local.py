@@ -25,6 +25,27 @@ from dataclasses import dataclass, field
 import streamlit as st
 
 # ----------------------------------------------------------------------------
+# Playwright bootstrap (needed on Streamlit Community Cloud, harmless locally)
+# ----------------------------------------------------------------------------
+
+@st.cache_resource(show_spinner="Installing headless browser (first run only)…")
+def _ensure_playwright_browser() -> str:
+    """Install Chromium for Playwright if missing. Cached for the app's lifetime."""
+    import subprocess
+    import sys
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            capture_output=True, text=True, timeout=600,
+        )
+        if proc.returncode != 0:
+            return f"playwright install failed: {proc.stderr[-500:]}"
+        return "ok"
+    except Exception as exc:  # noqa: BLE001
+        return f"playwright bootstrap error: {exc}"
+
+# ----------------------------------------------------------------------------
 # Config & constants
 # ----------------------------------------------------------------------------
 
@@ -168,6 +189,12 @@ def generate_via_perchance(
     prompt: str, negative_prompt: str, shape: str, guidance_scale: float, seed: int
 ) -> GenResult:
     started = time.time()
+    boot = _ensure_playwright_browser()
+    if boot != "ok":
+        return GenResult(
+            prompt=prompt, style="", backend="Perchance (unofficial)",
+            error=boot, elapsed=time.time() - started,
+        )
     last_err = ""
     for attempt in range(1, PERCHANCE_MAX_RETRIES + 1):
         try:
