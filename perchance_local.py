@@ -74,8 +74,10 @@ STYLE_PRESETS: dict[str, dict[str, str]] = {
 
 SHAPES = {
     "Square (768×768)": (768, 768),
+    "Square HD (1024×1024)": (1024, 1024),
     "Portrait (512×768)": (512, 768),
     "Landscape (768×512)": (768, 512),
+    "Landscape HD (1920×1080)": (1920, 1080),
 }
 
 HF_MODEL_PRESETS: dict[str, str] = {
@@ -110,37 +112,61 @@ class GenResult:
 # Backends
 # ----------------------------------------------------------------------------
 
+POLLINATIONS_MODELS: dict[str, str] = {
+    "Flux (strong general-purpose, recommended)": "flux",
+    "zimage (current default)": "zimage",
+    "Nano Banana Pro (needs key, high quality)": "nanobanana-pro",
+    "Seedream Pro (needs key, high quality)": "seedream-pro",
+    "GPT Image Large (needs key, high quality)": "gptimage-large",
+    "Ideogram v4 Quality (needs key, strong text rendering)": "ideogram-v4-quality",
+    "Turbo (fast, lower quality)": "turbo",
+}
+
+
 def generate_via_pollinations(
-    prompt: str, negative_prompt: str, width: int, height: int, seed: int
+    prompt: str, negative_prompt: str, width: int, height: int, seed: int,
+    model: str = "flux", enhance: bool = False,
 ) -> GenResult:
-    """Official free API — simple GET returns raw image bytes."""
+    """Pollinations.ai. Uses the authenticated gen.pollinations.ai endpoint if
+    POLLINATIONS_KEY is set in secrets (unlocks premium models); otherwise
+    falls back to the legacy no-key image.pollinations.ai endpoint."""
     started = time.time()
+    key = st.secrets.get("POLLINATIONS_KEY", "")
+
     params = {
         "width": width,
         "height": height,
         "nologo": "true",
+        "model": model,
     }
     if seed and seed > 0:
         params["seed"] = seed
     if negative_prompt:
         params["negative_prompt"] = negative_prompt
-    url = (
-        "https://image.pollinations.ai/prompt/"
-        + urllib.parse.quote(prompt)
-        + "?"
-        + urllib.parse.urlencode(params)
-    )
+    if enhance:
+        params["enhance"] = "true"
+
+    headers = {"User-Agent": "LumoraImageStudio/0.1"}
+    if key:
+        base = "https://gen.pollinations.ai/image/"
+        headers["Authorization"] = f"Bearer {key}"
+    else:
+        base = "https://image.pollinations.ai/prompt/"
+
+    url = base + urllib.parse.quote(prompt) + "?" + urllib.parse.urlencode(params)
+
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "LumoraImageStudio/0.1"})
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=120) as resp:
             img = resp.read()
+        backend_label = f"Pollinations.ai ({model}{'· keyed' if key else ''})"
         return GenResult(
-            prompt=prompt, style="", backend="Pollinations.ai",
+            prompt=prompt, style="", backend=backend_label,
             image_bytes=img, seed=seed, elapsed=time.time() - started,
         )
     except Exception as exc:  # noqa: BLE001
         return GenResult(
-            prompt=prompt, style="", backend="Pollinations.ai",
+            prompt=prompt, style="", backend=f"Pollinations.ai ({model})",
             error=f"{type(exc).__name__}: {exc}", elapsed=time.time() - started,
         )
 
@@ -236,6 +262,8 @@ def generate_one(
     guidance_scale: float,
     seed: int,
     hf_model_id: str = "",
+    pollinations_model: str = "flux",
+    pollinations_enhance: bool = False,
 ) -> GenResult:
     width, height = SHAPES[shape_key]
 
@@ -244,12 +272,18 @@ def generate_one(
             prompt, negative_prompt, hf_model_id, width, height, seed, guidance_scale
         )
         if result.error and allow_fallback:
-            fb = generate_via_pollinations(prompt, negative_prompt, width, height, seed)
+            fb = generate_via_pollinations(
+                prompt, negative_prompt, width, height, seed,
+                pollinations_model, pollinations_enhance,
+            )
             fb.extras["fallback_from"] = result.error
             return fb
         return result
 
-    return generate_via_pollinations(prompt, negative_prompt, width, height, seed)
+    return generate_via_pollinations(
+        prompt, negative_prompt, width, height, seed,
+        pollinations_model, pollinations_enhance,
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -301,9 +335,31 @@ with st.sidebar:
                 icon="🔑",
             )
 
+    pollinations_model = "flux"
+    pollinations_enhance = False
+    if backend_choice.startswith("Pollinations"):
+        poll_preset = st.selectbox(
+            "Model", list(POLLINATIONS_MODELS.keys()), key="poll_preset",
+        )
+        pollinations_model = POLLINATIONS_MODELS[poll_preset]
+        pollinations_enhance = st.toggle(
+            "Enhance prompt (AI-improved prompt before generating)",
+            value=False, key="poll_enhance",
+        )
+
+        if st.secrets.get("POLLINATIONS_KEY", ""):
+            st.caption("🔓 Pollinations key detected — premium models unlocked.")
+        elif "needs key" in poll_preset:
+            st.warning(
+                "This model needs POLLINATIONS_KEY in secrets — get a free key "
+                "at enter.pollinations.ai, or pick Flux/zimage/Turbo which work "
+                "without one.",
+                icon="🔑",
+            )
+
     allow_fallback = st.toggle(
         "Auto-fallback to Pollinations on failure",
-        value=False,
+        value=True,
         key="allow_fallback",
         disabled=backend_choice.startswith("Pollinations"),
     )
@@ -361,6 +417,8 @@ with tab_img:
                 backend_choice, allow_fallback, final_prompt,
                 final_negative, shape_key, guidance, run_seed,
                 hf_model_id=hf_model_id,
+                pollinations_model=pollinations_model,
+                pollinations_enhance=pollinations_enhance,
             )
             r.style = style_name
             results.append(r)
