@@ -144,6 +144,14 @@ async def _perchance_generate(
     """Generate one image via the unofficial perchance package."""
     import perchance  # imported lazily so the app still boots without it
 
+    if not hasattr(perchance, "ImageGenerator"):
+        raise ImportError(
+            f"The imported 'perchance' module at {getattr(perchance, '__file__', '?')} "
+            "has no ImageGenerator — you're likely shadowing the real package with a "
+            "local file/folder named 'perchance', or the wrong package is installed. "
+            "Expected: perchance 0.1.0 by EeeMoon (pip install -U perchance, Python 3.10+)."
+        )
+
     async with perchance.ImageGenerator() as gen:
         result = await gen.image(
             prompt,
