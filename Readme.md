@@ -1,62 +1,33 @@
-\# Lumora Image Studio (Streamlit)
+# Lumora Image Studio (Streamlit)
 
+Free/paid cloud image generation with **no local GPU** — Hugging Face Inference Providers with automatic Pollinations.ai fallback.
 
-
-Free cloud image generation with \*\*no local GPU\*\* — Perchance (unofficial) with automatic Pollinations.ai fallback.
-
-
-
-\## Setup
-
-
+## Setup
 
 ```bash
-
-pip install streamlit perchance
-
-playwright install chromium   # required: the perchance wrapper drives a headless browser
-
+pip install -r requirements.txt
 streamlit run app.py
-
 ```
 
+## Backends
 
+- **Hugging Face (official):** real model choice (FLUX.1-schnell, SDXL, SD3.5-medium, or any custom model ID). Needs a free `HF_TOKEN` — see below. Small monthly free-credit pool (roughly $0.10 → ~80 images depending on model), then `402` until next month or you add billing.
+- **Pollinations.ai (official):** no token needed, no credit ceiling — the reliable default and automatic fallback if Hugging Face errors or runs dry.
 
-If `playwright` isn't pulled in automatically: `pip install playwright` first.
+Perchance was removed: it has no official API, relied on a reverse-engineered wrapper, and consistently broke (import shadowing, Playwright/browser bootstrap issues, and — the final blocker — Perchance rejecting Streamlit Cloud's shared datacenter IPs during token verification). Not worth maintaining.
 
+## Hugging Face token setup
 
+1. Create a free account at huggingface.co.
+2. Settings → Access Tokens → New token → **Read** role is sufficient.
+3. Store it as a secret, never in code:
+   - Locally: `.streamlit/secrets.toml` → `HF_TOKEN = "hf_xxxxxxxx"`
+   - Streamlit Cloud: App settings → Secrets → same line
 
-\## How it works
-
-
-
-\- \*\*Perchance route (⚠️ unofficial):\*\* the `perchance` PyPI package launches headless Chromium, visits perchance.org to obtain a verification token, then calls the same internal image endpoint the website uses. There is \*\*no official API\*\* — this can break, rate-limit, or get blocked at any time. Keep usage modest; don't build production on it.
-
-\- \*\*Pollinations.ai route (official \& free):\*\* a plain HTTP GET returns the image. Slower/queue-dependent at peak times but sanctioned and stable.
-
-\- \*\*Fallback:\*\* if Perchance errors after retries, the app silently retries the same prompt on Pollinations (toggle in sidebar).
-
-
-
-\## Style presets
-
-
+## Style presets
 
 Realistic, Cinematic, Anime, Digital Art, Fantasy, Cyberpunk, Portrait Photography — each appends curated prompt/negative-prompt modifiers. "None" sends your raw prompt.
 
+## Video
 
-
-\## Video
-
-
-
-Perchance has \*\*no video backend\*\* — nothing exists to reverse-engineer. The Video tab is a wired placeholder for a paid provider (Replicate / fal.ai) later.
-
-
-
-\## Honest limits vs Colab/Kaggle
-
-
-
-This isn't "unlimited": Perchance rate-limits by IP/token, resolutions are capped (\~768px), and the backend is whatever SDXL variant the site currently runs — you can't pick models. What you gain over Colab/Kaggle is zero session timeouts, zero GPU quota management, and instant startup.
-
+Not wired up yet. The provider-abstraction pattern (`generate_one` → backend function → `GenResult`) makes it a drop-in addition once you pick a paid provider (HF Inference Providers text-to-video, Replicate, or fal.ai — Wan2.1 is available on HF's router and is the same model family used in past Kaggle experiments).
