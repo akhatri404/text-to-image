@@ -17,6 +17,40 @@ from dataclasses import dataclass, field
 
 import streamlit as st
 
+
+# ----------------------------------------------------------------------------
+# Shared usage tracking (this app's API keys are shared by ALL visitors —
+# st.cache_resource persists across sessions/users on this running instance,
+# unlike st.session_state which resets per browser tab).
+# ----------------------------------------------------------------------------
+
+@st.cache_resource
+def _usage_counters() -> dict:
+    return {"hf_calls": 0, "hf_errors": 0, "pollinations_calls": 0}
+
+
+def _bump_usage(key: str) -> None:
+    counters = _usage_counters()
+    counters[key] = counters.get(key, 0) + 1
+
+
+@st.cache_data(ttl=60)
+def _fetch_pollinations_balance(key: str) -> dict:
+    """Query Pollinations' real balance endpoint. Cached 60s and shared across
+    all users, so we don't hammer it on every page load/rerun."""
+    if not key:
+        return {}
+    try:
+        req = urllib.request.Request(
+            "https://gen.pollinations.ai/account/balance",
+            headers={"Authorization": f"Bearer {key}"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            import json as _json
+            return _json.loads(resp.read())
+    except Exception as exc:  # noqa: BLE001
+        return {"_error": f"{type(exc).__name__}: {exc}"}
+
 # ----------------------------------------------------------------------------
 # Config & constants
 # ----------------------------------------------------------------------------
@@ -160,6 +194,7 @@ def generate_via_pollinations(
         with urllib.request.urlopen(req, timeout=120) as resp:
             img = resp.read()
         backend_label = f"Pollinations.ai ({model}{'· keyed' if key else ''})"
+        _bump_usage("pollinations_calls")
         return GenResult(
             prompt=prompt, style="", backend=backend_label,
             image_bytes=img, seed=seed, elapsed=time.time() - started,
@@ -230,6 +265,7 @@ def generate_via_hf(
                 last_err = f"Unexpected JSON response: {info}"
                 break
 
+            _bump_usage("hf_calls")
             return GenResult(
                 prompt=prompt, style="", backend=f"HF Inference ({model_id})",
                 image_bytes=body, seed=seed, elapsed=time.time() - started,
@@ -247,6 +283,7 @@ def generate_via_hf(
             last_err = f"{type(exc).__name__}: {exc}"
             break
 
+    _bump_usage("hf_errors")
     return GenResult(
         prompt=prompt, style="", backend=f"HF Inference ({model_id})",
         error=last_err, elapsed=time.time() - started,
@@ -378,6 +415,43 @@ with st.sidebar:
     )
 
     st.divider()
+
+    with st.expander("📊 Usage & remaining credits", expanded=False):
+        st.caption(
+            "⚠️ These API keys are shared by every visitor to this app — "
+            "there's no per-user quota. One person's heavy use affects everyone."
+        )
+
+        counters = _usage_counters()
+        st.write(
+            f"**This session's app instance:** {counters['hf_calls']} HF images · "
+            f"{counters['hf_errors']} HF errors · "
+            f"{counters['pollinations_calls']} Pollinations images"
+        )
+        st.caption(
+            "Counts reset if the app restarts/redeploys — not a lifetime total."
+        )
+
+        st.markdown("**Pollinations Pollen balance**")
+        poll_key = st.secrets.get("POLLINATIONS_KEY", "")
+        if poll_key:
+            bal = _fetch_pollinations_balance(poll_key)
+            if "_error" in bal:
+                st.caption(f"Couldn't fetch balance: {bal['_error']}")
+            elif bal:
+                st.json(bal, expanded=False)
+            else:
+                st.caption("No balance data returned.")
+        else:
+            st.caption("Add POLLINATIONS_KEY to see live balance here.")
+
+        st.markdown("**Hugging Face credits**")
+        st.caption(
+            "No public API exists for checking remaining HF Inference "
+            "Provider credits — this can't be shown in-app. Check the real "
+            "number at huggingface.co → Settings → Inference Providers."
+        )
+
     st.caption(
         "Hugging Face free tier has a small monthly credit pool — expect it to "
         "run out with regular use. Pollinations has no such ceiling and is the "
@@ -427,6 +501,16 @@ with tab_img:
         progress.empty()
 
         st.session_state.last_batch = len(results)
+
+        counters = _usage_counters()
+        if counters["hf_errors"] >= 3 and counters["hf_calls"] == 0:
+            st.warning(
+                "Hugging Face has failed every time this app instance has tried it — "
+                "likely the shared credit pool is exhausted (everyone using this app "
+                "draws from the same account). Check the exact error above, or switch "
+                "to Pollinations in the sidebar.",
+                icon="⚠️",
+            )
 
     # Render the most recent batch from history (stable across reruns)
     batch = st.session_state.history[: st.session_state.get("last_batch", 0)]
