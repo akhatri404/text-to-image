@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import io
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
@@ -105,6 +106,17 @@ SHAPES = {
     "Portrait (512×768)": ("portrait", 512, 768),
     "Landscape (768×512)": ("landscape", 768, 512),
 }
+
+HF_MODEL_PRESETS: dict[str, str] = {
+    "FLUX.1 schnell (fast, best free-tier quality)": "black-forest-labs/FLUX.1-schnell",
+    "Stable Diffusion XL base 1.0": "stabilityai/stable-diffusion-xl-base-1.0",
+    "Stable Diffusion 3.5 medium": "stabilityai/stable-diffusion-3.5-medium",
+    "Custom model ID…": "",
+}
+
+HF_API_URL = "https://api-inference.huggingface.co/models/{model_id}"
+HF_MAX_RETRIES = 3
+HF_COLD_START_WAIT = 20  # seconds to wait when model is still loading
 
 DEFAULT_NEGATIVE = "blurry, low quality, watermark, text, jpeg artifacts"
 
@@ -264,6 +276,90 @@ def generate_via_pollinations(
         )
 
 
+def generate_via_hf(
+    prompt: str, negative_prompt: str, model_id: str, width: int, height: int, seed: int
+) -> GenResult:
+    """Official Hugging Face Serverless Inference API — no GPU needed locally."""
+    started = time.time()
+
+    token = st.secrets.get("HF_TOKEN", "")
+    if not token:
+        return GenResult(
+            prompt=prompt, style="", backend=f"HF Inference ({model_id})",
+            error=(
+                "No HF_TOKEN found in Streamlit secrets. Add one under "
+                "Settings → Secrets (or .streamlit/secrets.toml locally): "
+                'HF_TOKEN = "hf_xxxxxxxx" (Read-role token from '
+                "huggingface.co/settings/tokens)."
+            ),
+            elapsed=time.time() - started,
+        )
+
+    url = HF_API_URL.format(model_id=model_id)
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = {
+        "inputs": prompt,
+        "parameters": {
+            "negative_prompt": negative_prompt or None,
+            "width": width,
+            "height": height,
+        },
+    }
+    if seed and seed > 0:
+        payload["parameters"]["seed"] = seed
+
+    last_err = ""
+    for attempt in range(1, HF_MAX_RETRIES + 1):
+        try:
+            import json as _json
+
+            data = _json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=data, headers={
+                **headers, "Content-Type": "application/json",
+            })
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                content_type = resp.headers.get("Content-Type", "")
+                body = resp.read()
+
+            if "application/json" in content_type:
+                import json as _json
+                info = _json.loads(body)
+                # Model still cold-starting on HF's side
+                if isinstance(info, dict) and "estimated_time" in info:
+                    wait = min(info.get("estimated_time", HF_COLD_START_WAIT), 60)
+                    if attempt < HF_MAX_RETRIES:
+                        time.sleep(wait)
+                        continue
+                    last_err = f"Model still loading after retries: {info}"
+                    break
+                last_err = f"Unexpected JSON response: {info}"
+                break
+
+            # Otherwise it's raw image bytes
+            return GenResult(
+                prompt=prompt, style="", backend=f"HF Inference ({model_id})",
+                image_bytes=body, seed=seed, elapsed=time.time() - started,
+            )
+
+        except urllib.error.HTTPError as exc:
+            body_txt = exc.read().decode("utf-8", errors="ignore")
+            if exc.code == 503:  # cold start
+                if attempt < HF_MAX_RETRIES:
+                    time.sleep(HF_COLD_START_WAIT)
+                    continue
+            last_err = f"HTTP {exc.code}: {body_txt[:300]}"
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_err = f"{type(exc).__name__}: {exc}"
+            break
+
+    return GenResult(
+        prompt=prompt, style="", backend=f"HF Inference ({model_id})",
+        error=last_err, elapsed=time.time() - started,
+    )
+
+
+
 def generate_one(
     backend_choice: str,
     allow_fallback: bool,
@@ -272,11 +368,20 @@ def generate_one(
     shape_key: str,
     guidance_scale: float,
     seed: int,
+    hf_model_id: str = "",
 ) -> GenResult:
     shape, width, height = SHAPES[shape_key]
 
     if backend_choice.startswith("Perchance"):
         result = generate_via_perchance(prompt, negative_prompt, shape, guidance_scale, seed)
+        if result.error and allow_fallback:
+            fb = generate_via_pollinations(prompt, negative_prompt, width, height, seed)
+            fb.extras["fallback_from"] = result.error
+            return fb
+        return result
+
+    if backend_choice.startswith("Hugging Face"):
+        result = generate_via_hf(prompt, negative_prompt, hf_model_id, width, height, seed)
         if result.error and allow_fallback:
             fb = generate_via_pollinations(prompt, negative_prompt, width, height, seed)
             fb.extras["fallback_from"] = result.error
@@ -304,13 +409,39 @@ with st.sidebar:
 
     backend_choice = st.radio(
         "Backend",
-        ["Perchance (unofficial ⚠️)", "Pollinations.ai (official free API)"],
+        [
+            "Hugging Face (official, free tier)",
+            "Perchance (unofficial ⚠️)",
+            "Pollinations.ai (official free API)",
+        ],
         key="backend_choice",
         help=(
-            "Perchance has no official API — this uses a reverse-engineered "
-            "wrapper that may break or rate-limit at any time."
+            "Hugging Face: official API, real model choice, needs a free token. "
+            "Perchance: reverse-engineered wrapper, no official API, may break "
+            "or get blocked on cloud hosting. Pollinations: official, no token needed."
         ),
     )
+
+    hf_model_id = ""
+    if backend_choice.startswith("Hugging Face"):
+        hf_preset = st.selectbox(
+            "Model", list(HF_MODEL_PRESETS.keys()), key="hf_preset",
+        )
+        if hf_preset == "Custom model ID…":
+            hf_model_id = st.text_input(
+                "Hugging Face model ID", key="hf_custom_model",
+                placeholder="e.g. black-forest-labs/FLUX.1-dev",
+            )
+        else:
+            hf_model_id = HF_MODEL_PRESETS[hf_preset]
+
+        if not st.secrets.get("HF_TOKEN", ""):
+            st.warning(
+                "No HF_TOKEN in secrets yet — add one under Settings → Secrets "
+                "to use this backend.",
+                icon="🔑",
+            )
+
     allow_fallback = st.toggle(
         "Auto-fallback to Pollinations on failure",
         value=True,
@@ -355,6 +486,10 @@ with tab_img:
     negative = st.text_input("Negative prompt", value=DEFAULT_NEGATIVE, key="negative")
 
     if st.button("✨ Generate", type="primary", use_container_width=True, disabled=not prompt.strip(), key="btn_generate"):
+        if backend_choice.startswith("Hugging Face") and not hf_model_id.strip():
+            st.error("Enter a model ID (or pick a preset) for the Hugging Face backend.")
+            st.stop()
+
         preset = STYLE_PRESETS[style_name]
         final_prompt = prompt.strip() + preset["suffix"]
         final_negative = ", ".join(x for x in [negative.strip(), preset["negative"]] if x)
@@ -366,6 +501,7 @@ with tab_img:
             r = generate_one(
                 backend_choice, allow_fallback, final_prompt,
                 final_negative, shape_key, guidance, run_seed,
+                hf_model_id=hf_model_id,
             )
             r.style = style_name
             results.append(r)
