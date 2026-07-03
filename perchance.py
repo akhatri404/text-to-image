@@ -109,15 +109,29 @@ class GenResult:
 # ----------------------------------------------------------------------------
 
 def _run_async(coro):
-    """Run an async coroutine from Streamlit's sync world."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            raise RuntimeError
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+    """Run an async coroutine safely from Streamlit's sync world.
+
+    Executes in a dedicated thread with its own event loop so Playwright's
+    async machinery never clashes with Streamlit's script-runner thread.
+    """
+    import threading
+
+    result: dict = {}
+
+    def _worker():
+        try:
+            result["value"] = asyncio.run(coro)
+        except BaseException as exc:  # noqa: BLE001 — re-raised in caller
+            result["error"] = exc
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join(timeout=300)
+    if t.is_alive():
+        raise TimeoutError("Generation timed out after 300s")
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
 
 
 async def _perchance_generate(
@@ -256,6 +270,7 @@ with st.sidebar:
     backend_choice = st.radio(
         "Backend",
         ["Perchance (unofficial ⚠️)", "Pollinations.ai (official free API)"],
+        key="backend_choice",
         help=(
             "Perchance has no official API — this uses a reverse-engineered "
             "wrapper that may break or rate-limit at any time."
@@ -264,18 +279,20 @@ with st.sidebar:
     allow_fallback = st.toggle(
         "Auto-fallback to Pollinations on failure",
         value=True,
+        key="allow_fallback",
         disabled=backend_choice.startswith("Pollinations"),
     )
 
-    style_name = st.selectbox("Style preset", list(STYLE_PRESETS.keys()), index=2)
-    shape_key = st.selectbox("Shape / resolution", list(SHAPES.keys()))
-    num_images = st.slider("Images per run", 1, MAX_IMAGES_PER_RUN, 1)
+    style_name = st.selectbox("Style preset", list(STYLE_PRESETS.keys()), index=2, key="style_name")
+    shape_key = st.selectbox("Shape / resolution", list(SHAPES.keys()), key="shape_key")
+    num_images = st.slider("Images per run", 1, MAX_IMAGES_PER_RUN, 1, key="num_images")
     guidance = st.slider(
         "Guidance scale (Perchance only)", 1.0, 20.0, 7.0, 0.5,
+        key="guidance",
         help="Higher = follows the prompt more literally.",
     )
     seed = st.number_input(
-        "Seed (-1 = random)", value=-1, step=1,
+        "Seed (-1 = random)", value=-1, step=1, key="seed",
         help="Fix a seed on Perchance to make results reproducible.",
     )
 
@@ -296,12 +313,13 @@ tab_img, tab_video, tab_history = st.tabs(["🖼️ Image", "🎥 Video (coming 
 with tab_img:
     prompt = st.text_area(
         "Prompt",
+        key="prompt",
         placeholder="A lone samurai walking through neon-lit rain at midnight…",
         height=100,
     )
-    negative = st.text_input("Negative prompt", value=DEFAULT_NEGATIVE)
+    negative = st.text_input("Negative prompt", value=DEFAULT_NEGATIVE, key="negative")
 
-    if st.button("✨ Generate", type="primary", use_container_width=True, disabled=not prompt.strip()):
+    if st.button("✨ Generate", type="primary", use_container_width=True, disabled=not prompt.strip(), key="btn_generate"):
         preset = STYLE_PRESETS[style_name]
         final_prompt = prompt.strip() + preset["suffix"]
         final_negative = ", ".join(x for x in [negative.strip(), preset["negative"]] if x)
@@ -320,8 +338,13 @@ with tab_img:
             progress.progress((i + 1) / num_images, text=f"Generated {i + 1}/{num_images}")
         progress.empty()
 
-        cols = st.columns(min(len(results), 2))
-        for i, r in enumerate(results):
+        st.session_state.last_batch = len(results)
+
+    # Render the most recent batch from history (stable across reruns)
+    batch = st.session_state.history[: st.session_state.get("last_batch", 0)]
+    if batch:
+        cols = st.columns(min(len(batch), 2))
+        for i, r in enumerate(batch):
             with cols[i % len(cols)]:
                 if r.image_bytes:
                     st.image(r.image_bytes, use_container_width=True)
@@ -332,9 +355,9 @@ with tab_img:
                     st.download_button(
                         "⬇️ Download PNG",
                         data=r.image_bytes,
-                        file_name=f"lumora_{int(time.time())}_{i}.png",
+                        file_name=f"lumora_{i}.png",
                         mime="image/png",
-                        key=f"dl_{time.time()}_{i}",
+                        key=f"dl_batch_{i}",
                         use_container_width=True,
                     )
                 else:
@@ -348,14 +371,14 @@ with tab_video:
         "Hunyuan Video, etc., billed per second of GPU time). "
         "The provider abstraction in this app makes that a drop-in addition."
     )
-    st.text_area("Video prompt (disabled)", disabled=True,
+    st.text_area("Video prompt (disabled)", disabled=True, key="video_prompt",
                  placeholder="Available once a video provider is connected…")
 
 with tab_history:
     if not st.session_state.history:
         st.caption("No generations yet — your session history will appear here.")
     else:
-        if st.button("Clear history"):
+        if st.button("Clear history", key="btn_clear_history"):
             st.session_state.history = []
             st.rerun()
         for i, r in enumerate(st.session_state.history):
