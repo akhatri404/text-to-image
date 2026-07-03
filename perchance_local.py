@@ -114,7 +114,7 @@ HF_MODEL_PRESETS: dict[str, str] = {
     "Custom model ID…": "",
 }
 
-HF_API_URL = "https://api-inference.huggingface.co/models/{model_id}"
+HF_API_URL = "https://router.huggingface.co/hf-inference/models/{model_id}"
 HF_MAX_RETRIES = 3
 HF_COLD_START_WAIT = 20  # seconds to wait when model is still loading
 
