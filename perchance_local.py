@@ -1,22 +1,14 @@
 """
-Lumora Image Studio — Streamlit front-end over free, no-GPU image backends.
+Lumora Image Studio — Streamlit front-end over free/paid, no-GPU image backends.
 
 Backends:
-  1. Perchance (unofficial, reverse-engineered via the `perchance` package;
-     uses a headless Playwright browser to obtain a verification token).
-  2. Pollinations.ai (official free public API) — used as automatic fallback
-     when Perchance rate-limits or errors.
-
-NOTE: Perchance has NO official API. This can break at any time and heavy
-usage may get you rate-limited or blocked. Keep volume modest.
-Video generation is NOT available on Perchance — the Video tab is a
-placeholder wired for a future paid provider (Replicate / fal.ai).
+  1. Hugging Face Inference Providers (official, needs a free HF_TOKEN in secrets).
+  2. Pollinations.ai (official free public API, no token needed) — also used
+     as automatic fallback when Hugging Face errors or runs out of credits.
 """
 
 from __future__ import annotations
 
-import asyncio
-import io
 import time
 import urllib.error
 import urllib.parse
@@ -24,27 +16,6 @@ import urllib.request
 from dataclasses import dataclass, field
 
 import streamlit as st
-
-# ----------------------------------------------------------------------------
-# Playwright bootstrap (needed on Streamlit Community Cloud, harmless locally)
-# ----------------------------------------------------------------------------
-
-@st.cache_resource(show_spinner="Installing headless browser (first run only)…")
-def _ensure_playwright_browser() -> str:
-    """Install Chromium for Playwright if missing. Cached for the app's lifetime."""
-    import subprocess
-    import sys
-
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
-            capture_output=True, text=True, timeout=600,
-        )
-        if proc.returncode != 0:
-            return f"playwright install failed: {proc.stderr[-500:]}"
-        return "ok"
-    except Exception as exc:  # noqa: BLE001
-        return f"playwright bootstrap error: {exc}"
 
 # ----------------------------------------------------------------------------
 # Config & constants
@@ -102,9 +73,9 @@ STYLE_PRESETS: dict[str, dict[str, str]] = {
 }
 
 SHAPES = {
-    "Square (768×768)": ("square", 768, 768),
-    "Portrait (512×768)": ("portrait", 512, 768),
-    "Landscape (768×512)": ("landscape", 768, 512),
+    "Square (768×768)": (768, 768),
+    "Portrait (512×768)": (512, 768),
+    "Landscape (768×512)": (768, 512),
 }
 
 HF_MODEL_PRESETS: dict[str, str] = {
@@ -120,9 +91,7 @@ HF_COLD_START_WAIT = 20  # seconds to wait when model is still loading
 
 DEFAULT_NEGATIVE = "blurry, low quality, watermark, text, jpeg artifacts"
 
-MAX_IMAGES_PER_RUN = 4          # be a good citizen — don't hammer free backends
-PERCHANCE_MAX_RETRIES = 2
-RETRY_BACKOFF_SECONDS = 4
+MAX_IMAGES_PER_RUN = 4  # be a good citizen — don't hammer free backends
 
 
 @dataclass
@@ -140,99 +109,6 @@ class GenResult:
 # ----------------------------------------------------------------------------
 # Backends
 # ----------------------------------------------------------------------------
-
-def _run_async(coro):
-    """Run an async coroutine safely from Streamlit's sync world.
-
-    Executes in a dedicated thread with its own event loop so Playwright's
-    async machinery never clashes with Streamlit's script-runner thread.
-    """
-    import threading
-
-    result: dict = {}
-
-    def _worker():
-        try:
-            result["value"] = asyncio.run(coro)
-        except BaseException as exc:  # noqa: BLE001 — re-raised in caller
-            result["error"] = exc
-
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
-    t.join(timeout=300)
-    if t.is_alive():
-        raise TimeoutError("Generation timed out after 300s")
-    if "error" in result:
-        raise result["error"]
-    return result.get("value")
-
-
-async def _perchance_generate(
-    prompt: str,
-    negative_prompt: str,
-    shape: str,
-    guidance_scale: float,
-    seed: int,
-) -> bytes:
-    """Generate one image via the unofficial perchance package."""
-    import perchance  # imported lazily so the app still boots without it
-
-    if not hasattr(perchance, "ImageGenerator"):
-        raise ImportError(
-            f"The imported 'perchance' module at {getattr(perchance, '__file__', '?')} "
-            "has no ImageGenerator — you're likely shadowing the real package with a "
-            "local file/folder named 'perchance', or the wrong package is installed. "
-            "Expected: perchance 0.1.0 by EeeMoon (pip install -U perchance, Python 3.10+)."
-        )
-
-    async with perchance.ImageGenerator() as gen:
-        result = await gen.image(
-            prompt,
-            negative_prompt=negative_prompt or None,
-            shape=shape,  # 'portrait' | 'square' | 'landscape'
-            guidance_scale=guidance_scale,
-            seed=seed,
-        )
-        binary = await result.download()
-        return binary.read() if hasattr(binary, "read") else bytes(binary)
-
-
-def generate_via_perchance(
-    prompt: str, negative_prompt: str, shape: str, guidance_scale: float, seed: int
-) -> GenResult:
-    started = time.time()
-    boot = _ensure_playwright_browser()
-    if boot != "ok":
-        return GenResult(
-            prompt=prompt, style="", backend="Perchance (unofficial)",
-            error=boot, elapsed=time.time() - started,
-        )
-    last_err = ""
-    for attempt in range(1, PERCHANCE_MAX_RETRIES + 1):
-        try:
-            img = _run_async(
-                _perchance_generate(prompt, negative_prompt, shape, guidance_scale, seed)
-            )
-            return GenResult(
-                prompt=prompt,
-                style="",
-                backend="Perchance (unofficial)",
-                image_bytes=img,
-                seed=seed,
-                elapsed=time.time() - started,
-            )
-        except Exception as exc:  # noqa: BLE001 — surface everything to the UI
-            last_err = f"{type(exc).__name__}: {exc}"
-            if attempt < PERCHANCE_MAX_RETRIES:
-                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
-    return GenResult(
-        prompt=prompt,
-        style="",
-        backend="Perchance (unofficial)",
-        error=last_err,
-        elapsed=time.time() - started,
-    )
-
 
 def generate_via_pollinations(
     prompt: str, negative_prompt: str, width: int, height: int, seed: int
@@ -259,27 +135,21 @@ def generate_via_pollinations(
         with urllib.request.urlopen(req, timeout=120) as resp:
             img = resp.read()
         return GenResult(
-            prompt=prompt,
-            style="",
-            backend="Pollinations.ai",
-            image_bytes=img,
-            seed=seed,
-            elapsed=time.time() - started,
+            prompt=prompt, style="", backend="Pollinations.ai",
+            image_bytes=img, seed=seed, elapsed=time.time() - started,
         )
     except Exception as exc:  # noqa: BLE001
         return GenResult(
-            prompt=prompt,
-            style="",
-            backend="Pollinations.ai",
-            error=f"{type(exc).__name__}: {exc}",
-            elapsed=time.time() - started,
+            prompt=prompt, style="", backend="Pollinations.ai",
+            error=f"{type(exc).__name__}: {exc}", elapsed=time.time() - started,
         )
 
 
 def generate_via_hf(
-    prompt: str, negative_prompt: str, model_id: str, width: int, height: int, seed: int
+    prompt: str, negative_prompt: str, model_id: str, width: int, height: int,
+    seed: int, guidance_scale: float = 7.0,
 ) -> GenResult:
-    """Official Hugging Face Serverless Inference API — no GPU needed locally."""
+    """Official Hugging Face Inference Providers API — no GPU needed locally."""
     started = time.time()
 
     token = st.secrets.get("HF_TOKEN", "")
@@ -303,6 +173,7 @@ def generate_via_hf(
             "negative_prompt": negative_prompt or None,
             "width": width,
             "height": height,
+            "guidance_scale": guidance_scale,
         },
     }
     if seed and seed > 0:
@@ -322,9 +193,7 @@ def generate_via_hf(
                 body = resp.read()
 
             if "application/json" in content_type:
-                import json as _json
                 info = _json.loads(body)
-                # Model still cold-starting on HF's side
                 if isinstance(info, dict) and "estimated_time" in info:
                     wait = min(info.get("estimated_time", HF_COLD_START_WAIT), 60)
                     if attempt < HF_MAX_RETRIES:
@@ -335,7 +204,6 @@ def generate_via_hf(
                 last_err = f"Unexpected JSON response: {info}"
                 break
 
-            # Otherwise it's raw image bytes
             return GenResult(
                 prompt=prompt, style="", backend=f"HF Inference ({model_id})",
                 image_bytes=body, seed=seed, elapsed=time.time() - started,
@@ -359,7 +227,6 @@ def generate_via_hf(
     )
 
 
-
 def generate_one(
     backend_choice: str,
     allow_fallback: bool,
@@ -370,18 +237,12 @@ def generate_one(
     seed: int,
     hf_model_id: str = "",
 ) -> GenResult:
-    shape, width, height = SHAPES[shape_key]
-
-    if backend_choice.startswith("Perchance"):
-        result = generate_via_perchance(prompt, negative_prompt, shape, guidance_scale, seed)
-        if result.error and allow_fallback:
-            fb = generate_via_pollinations(prompt, negative_prompt, width, height, seed)
-            fb.extras["fallback_from"] = result.error
-            return fb
-        return result
+    width, height = SHAPES[shape_key]
 
     if backend_choice.startswith("Hugging Face"):
-        result = generate_via_hf(prompt, negative_prompt, hf_model_id, width, height, seed)
+        result = generate_via_hf(
+            prompt, negative_prompt, hf_model_id, width, height, seed, guidance_scale
+        )
         if result.error and allow_fallback:
             fb = generate_via_pollinations(prompt, negative_prompt, width, height, seed)
             fb.extras["fallback_from"] = result.error
@@ -411,14 +272,12 @@ with st.sidebar:
         "Backend",
         [
             "Hugging Face (official, free tier)",
-            "Perchance (unofficial ⚠️)",
             "Pollinations.ai (official free API)",
         ],
         key="backend_choice",
         help=(
             "Hugging Face: official API, real model choice, needs a free token. "
-            "Perchance: reverse-engineered wrapper, no official API, may break "
-            "or get blocked on cloud hosting. Pollinations: official, no token needed."
+            "Pollinations: official, no token needed, no credit ceiling."
         ),
     )
 
@@ -444,7 +303,7 @@ with st.sidebar:
 
     allow_fallback = st.toggle(
         "Auto-fallback to Pollinations on failure",
-        value=False,
+        value=True,
         key="allow_fallback",
         disabled=backend_choice.startswith("Pollinations"),
     )
@@ -453,20 +312,20 @@ with st.sidebar:
     shape_key = st.selectbox("Shape / resolution", list(SHAPES.keys()), key="shape_key")
     num_images = st.slider("Images per run", 1, MAX_IMAGES_PER_RUN, 1, key="num_images")
     guidance = st.slider(
-        "Guidance scale (Perchance only)", 1.0, 20.0, 7.0, 0.5,
+        "Guidance scale (Hugging Face only)", 1.0, 20.0, 7.0, 0.5,
         key="guidance",
-        help="Higher = follows the prompt more literally.",
+        help="Higher = follows the prompt more literally. Not used by Pollinations.",
     )
     seed = st.number_input(
         "Seed (-1 = random)", value=-1, step=1, key="seed",
-        help="Fix a seed on Perchance to make results reproducible.",
+        help="Fix a seed to make results reproducible.",
     )
 
     st.divider()
     st.caption(
-        "⚠️ Perchance route is a gray-area hack: keep volume modest, "
-        "expect breakage, and don't build a business on it. "
-        "Video is not available on Perchance."
+        "Hugging Face free tier has a small monthly credit pool — expect it to "
+        "run out with regular use. Pollinations has no such ceiling and is the "
+        "reliable fallback."
     )
 
 
@@ -521,7 +380,7 @@ with tab_img:
                     st.image(r.image_bytes, use_container_width=True)
                     note = f"{r.backend} · {r.elapsed:.1f}s"
                     if "fallback_from" in r.extras:
-                        note += " · fell back after Perchance error"
+                        note += " · fell back after Hugging Face error"
                     st.caption(note)
                     st.download_button(
                         "⬇️ Download PNG",
@@ -536,11 +395,11 @@ with tab_img:
 
 with tab_video:
     st.info(
-        "**Perchance has no video generation backend**, so there is nothing to "
-        "reverse-engineer here. When you're ready, this tab is designed to plug "
-        "into a real text-to-video provider (Replicate or fal.ai — WAN, Kling, "
-        "Hunyuan Video, etc., billed per second of GPU time). "
-        "The provider abstraction in this app makes that a drop-in addition."
+        "Video generation isn't wired up yet. When you're ready, this tab is "
+        "designed to plug into a real text-to-video provider (Hugging Face "
+        "Inference Providers, Replicate, or fal.ai — Wan2.1, Kling, "
+        "HunyuanVideo, etc., billed per second of GPU time). The provider "
+        "abstraction in this app makes that a drop-in addition."
     )
     st.text_area("Video prompt (disabled)", disabled=True, key="video_prompt",
                  placeholder="Available once a video provider is connected…")
