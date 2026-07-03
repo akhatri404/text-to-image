@@ -359,7 +359,7 @@ with st.sidebar:
 
     allow_fallback = st.toggle(
         "Auto-fallback to Pollinations on failure",
-        value=True,
+        value=False,
         key="allow_fallback",
         disabled=backend_choice.startswith("Pollinations"),
     )
