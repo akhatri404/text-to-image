@@ -100,6 +100,50 @@ STYLE_PRESETS: dict[str, dict[str, str]] = {
         ),
         "negative": "cartoon, deformed face, extra fingers, plastic skin, oversaturated",
     },
+    "IMAX 70mm": {
+        "suffix": (
+            ", shot on IMAX 70mm film, large format cinematography, extreme "
+            "resolution and detail, crisp sharp focus, rich color depth, "
+            "epic scale, premium cinema quality, masterful composition"
+        ),
+        "negative": "low resolution, grainy, blurry, compressed, artifacts, low quality, cropped",
+    },
+    "8K Hyperrealistic": {
+        "suffix": (
+            ", 8k resolution, hyperrealistic, ultra sharp detail, HDR, "
+            "professional photography, flawless rendering, maximum fidelity"
+        ),
+        "negative": "low resolution, blurry, low detail, compressed, artifacts, cartoon",
+    },
+    "Studio Product Photography": {
+        "suffix": (
+            ", studio product photography, softbox lighting, seamless "
+            "background, commercial quality, sharp focus, high detail, "
+            "professional retouching"
+        ),
+        "negative": "cluttered background, blurry, low quality, amateur, watermark",
+    },
+    "Analog Film (35mm)": {
+        "suffix": (
+            ", shot on 35mm analog film, Kodak Portra stock, fine film "
+            "grain, warm tones, authentic film look, cinematic color science"
+        ),
+        "negative": "digital, oversharpened, hdr, plastic skin, low quality",
+    },
+    "Black & White Fine Art": {
+        "suffix": (
+            ", black and white fine art photography, dramatic contrast, "
+            "rich tonal range, timeless composition, gallery quality"
+        ),
+        "negative": "color, oversaturated, low contrast, blurry, low quality",
+    },
+    "Architectural / Interior": {
+        "suffix": (
+            ", architectural photography, wide angle lens, natural light, "
+            "clean lines, high detail, magazine quality"
+        ),
+        "negative": "cluttered, distorted perspective, blurry, low detail, watermark",
+    },
 }
 
 SHAPES = {
@@ -139,16 +183,23 @@ POLLINATIONS_MODELS: dict[str, str] = {
     "GPT Image Large (needs key, high quality)": "gptimage-large",
     "Ideogram v4 Quality (needs key, strong text rendering)": "ideogram-v4-quality",
     "Turbo (fast, lower quality)": "turbo",
+    "Kontext (edit an existing image via URL)": "kontext",
 }
+
+IMAGE_EDIT_MODEL = "kontext"
 
 
 def generate_via_pollinations(
     prompt: str, negative_prompt: str, width: int, height: int, seed: int,
-    model: str = "flux", enhance: bool = False,
+    model: str = "flux", enhance: bool = False, image_url: str = "",
 ) -> GenResult:
     """Pollinations.ai. Uses the authenticated gen.pollinations.ai endpoint if
     POLLINATIONS_KEY is set in secrets (unlocks premium models); otherwise
-    falls back to the legacy no-key image.pollinations.ai endpoint."""
+    falls back to the legacy no-key image.pollinations.ai endpoint.
+
+    image_url, when set, is passed as the `image` reference param — only the
+    "kontext" model uses it, to edit that image per the prompt instead of
+    generating from scratch."""
     started = time.time()
     key = st.secrets.get("POLLINATIONS_KEY", "")
 
@@ -164,6 +215,8 @@ def generate_via_pollinations(
         params["negative_prompt"] = negative_prompt
     if enhance:
         params["enhance"] = "true"
+    if image_url:
+        params["image"] = image_url
 
     headers = {"User-Agent": "LumoraImageStudio/0.1"}
     if key:
@@ -215,6 +268,13 @@ with st.sidebar:
         "Enhance prompt (AI-improved prompt before generating)",
         value=False, key="poll_enhance",
     )
+
+    if pollinations_model == IMAGE_EDIT_MODEL:
+        st.caption(
+            "✏️ Kontext edits the reference image per your prompt instead of "
+            "generating from scratch. Note: output is always 1024×1024 in "
+            "this mode — the shape setting below is ignored."
+        )
 
     if st.secrets.get("POLLINATIONS_KEY", ""):
         st.caption("🔓 Pollinations key detected — premium models unlocked.")
@@ -277,7 +337,20 @@ with tab_img:
     )
     negative = st.text_input("Negative prompt", value=DEFAULT_NEGATIVE, key="negative")
 
-    if st.button("✨ Generate", type="primary", use_container_width=True, disabled=not prompt.strip(), key="btn_generate"):
+    image_url = ""
+    if pollinations_model == IMAGE_EDIT_MODEL:
+        image_url = st.text_input(
+            "Reference image URL",
+            key="image_url",
+            placeholder="https://example.com/photo.jpg",
+            help="Paste a direct link to the image you want Kontext to edit.",
+        )
+        if image_url and not image_url.strip().lower().startswith(("http://", "https://")):
+            st.error("Reference image URL must start with http:// or https://")
+
+    edit_ready = pollinations_model != IMAGE_EDIT_MODEL or bool(image_url.strip())
+
+    if st.button("✨ Generate", type="primary", use_container_width=True, disabled=not prompt.strip() or not edit_ready, key="btn_generate"):
         preset = STYLE_PRESETS[style_name]
         final_prompt = prompt.strip() + preset["suffix"]
         final_negative = ", ".join(x for x in [negative.strip(), preset["negative"]] if x)
@@ -289,7 +362,7 @@ with tab_img:
             run_seed = int(seed) if int(seed) > 0 else -1
             r = generate_via_pollinations(
                 final_prompt, final_negative, width, height, run_seed,
-                pollinations_model, pollinations_enhance,
+                pollinations_model, pollinations_enhance, image_url.strip(),
             )
             r.style = style_name
             results.append(r)

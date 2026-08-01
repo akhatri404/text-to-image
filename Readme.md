@@ -12,6 +12,7 @@ streamlit run app.py
 ## Backend
 
 - **Pollinations.ai (official):** model picker (Flux, zimage, Turbo work with no key; Nano Banana Pro, Seedream Pro, GPT Image Large, Ideogram v4 Quality need a free `POLLINATIONS_KEY`), optional AI prompt-enhance toggle, resolutions up to 1920×1080.
+- **Kontext (image editing):** pick the "Kontext" model, paste a reference image URL, and describe the edit in the prompt — it transforms that image instead of generating from scratch. No extra key needed, same `POLLINATIONS_KEY`/no-key rules as the other models. Output is fixed at 1024×1024 in this mode (a known upstream limitation). The image must be reachable via a public URL, not a local file upload.
 
 Perchance was removed: it has no official API, relied on a reverse-engineered wrapper, and consistently broke (import shadowing, Playwright/browser bootstrap issues, and — the final blocker — Perchance rejecting Streamlit Cloud's shared datacenter IPs during token verification). Not worth maintaining.
 
