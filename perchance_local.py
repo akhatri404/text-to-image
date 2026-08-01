@@ -188,20 +188,25 @@ POLLINATIONS_MODELS: dict[str, str] = {
 
 IMAGE_EDIT_MODEL = "kontext"
 
+# Models that actually require a paid Pollen balance. Everything else stays on
+# the free anonymous endpoint even when a key is configured, so a drained
+# balance (or a key added just to test a premium model) can't 402 free models.
+KEYED_MODELS = {"nanobanana-pro", "seedream-pro", "gptimage-large", "ideogram-v4-quality"}
+
 
 def generate_via_pollinations(
     prompt: str, negative_prompt: str, width: int, height: int, seed: int,
     model: str = "flux", enhance: bool = False, image_url: str = "",
 ) -> GenResult:
-    """Pollinations.ai. Uses the authenticated gen.pollinations.ai endpoint if
-    POLLINATIONS_KEY is set in secrets (unlocks premium models); otherwise
-    falls back to the legacy no-key image.pollinations.ai endpoint.
+    """Pollinations.ai. Uses the authenticated gen.pollinations.ai endpoint
+    (and spends Pollen balance) only for models in KEYED_MODELS; everything
+    else always goes through the free no-key image.pollinations.ai endpoint.
 
     image_url, when set, is passed as the `image` reference param — only the
     "kontext" model uses it, to edit that image per the prompt instead of
     generating from scratch."""
     started = time.time()
-    key = st.secrets.get("POLLINATIONS_KEY", "")
+    key = st.secrets.get("POLLINATIONS_KEY", "") if model in KEYED_MODELS else ""
 
     params = {
         "width": width,
