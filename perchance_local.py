@@ -188,25 +188,27 @@ POLLINATIONS_MODELS: dict[str, str] = {
 
 IMAGE_EDIT_MODEL = "kontext"
 
-# Models that actually require a paid Pollen balance. Everything else stays on
-# the free anonymous endpoint even when a key is configured, so a drained
-# balance (or a key added just to test a premium model) can't 402 free models.
+# Models that require a paid Pollen balance no matter what — they simply
+# don't exist on the free anonymous endpoint.
 KEYED_MODELS = {"nanobanana-pro", "seedream-pro", "gptimage-large", "ideogram-v4-quality"}
 
 
 def generate_via_pollinations(
     prompt: str, negative_prompt: str, width: int, height: int, seed: int,
     model: str = "flux", enhance: bool = False, image_url: str = "",
+    use_paid_endpoint: bool = False,
 ) -> GenResult:
     """Pollinations.ai. Uses the authenticated gen.pollinations.ai endpoint
-    (and spends Pollen balance) only for models in KEYED_MODELS; everything
-    else always goes through the free no-key image.pollinations.ai endpoint.
+    (spends Pollen balance) for models in KEYED_MODELS, or for any model when
+    use_paid_endpoint is checked (the authenticated endpoint also serves
+    higher-quality output for the free models); otherwise uses the free
+    no-key image.pollinations.ai endpoint.
 
     image_url, when set, is passed as the `image` reference param — only the
     "kontext" model uses it, to edit that image per the prompt instead of
     generating from scratch."""
     started = time.time()
-    key = st.secrets.get("POLLINATIONS_KEY", "") if model in KEYED_MODELS else ""
+    key = st.secrets.get("POLLINATIONS_KEY", "") if (model in KEYED_MODELS or use_paid_endpoint) else ""
 
     params = {
         "width": width,
@@ -281,14 +283,29 @@ with st.sidebar:
             "this mode — the shape setting below is ignored."
         )
 
-    if st.secrets.get("POLLINATIONS_KEY", ""):
+    has_key = bool(st.secrets.get("POLLINATIONS_KEY", ""))
+    needs_key = pollinations_model in KEYED_MODELS
+
+    if has_key:
         st.caption("🔓 Pollinations key detected — premium models unlocked.")
-    elif "needs key" in poll_preset:
+    elif needs_key:
         st.warning(
             "This model needs POLLINATIONS_KEY in secrets — get a free key "
             "at enter.pollinations.ai, or pick Flux/zimage/Turbo which work "
             "without one.",
             icon="🔑",
+        )
+
+    use_paid_endpoint = needs_key
+    if has_key and not needs_key:
+        use_paid_endpoint = st.checkbox(
+            "Use paid endpoint for this model (spends Pollen balance, higher quality)",
+            value=False, key="use_paid_endpoint",
+            help=(
+                "Routes this free model through the authenticated Pollinations "
+                "endpoint instead of the anonymous one — same model, often "
+                "better output quality, but draws from your Pollen balance."
+            ),
         )
 
     style_name = st.selectbox("Style preset", list(STYLE_PRESETS.keys()), index=2, key="style_name")
@@ -368,6 +385,7 @@ with tab_img:
             r = generate_via_pollinations(
                 final_prompt, final_negative, width, height, run_seed,
                 pollinations_model, pollinations_enhance, image_url.strip(),
+                use_paid_endpoint,
             )
             r.style = style_name
             results.append(r)
